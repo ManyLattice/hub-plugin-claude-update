@@ -1,5 +1,7 @@
 # claude-update: обновить Claude Code кнопкой
 
+<img src="icon.svg" width="256" alt="Обновить Claude Code">
+
 Плагин для [Agents Hub](https://github.com/flagman/agents-hub-core). Вкладка «Настройки» → «Claude Code» показывает,
 какая версия Claude Code стоит, какая доступна и как claude поставлен на этой машине. Кнопка «Обновить» ставит новую
 версию тем же способом:
