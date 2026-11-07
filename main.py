@@ -1,5 +1,5 @@
 """Обновить Claude Code по слову владельца: процесс плагина знает версии и ставит новую, страница — кнопка
-(«Настройки» → «Claude Code»). Говорит со страницей по HTTP на порту страницы + 11, только со своей страницы."""
+(«Настройки» → «Claude Code»); там же аккаунт Claude: кто вошёл, до какого числа, кто из сессий упал на входе. Говорит со страницей по HTTP на порту страницы + 11, только со своей страницы."""
 import http.server
 import json
 import os
@@ -12,9 +12,11 @@ import claude_update as cu
 
 WEB_PORT = int(os.environ.get("HUB_WEB_PORT", "8787"))
 PORT = WEB_PORT + 11
+ACCOUNT_S = 60
 FRESH_S = 1800   # доступную версию спрашиваем не чаще раза в полчаса, «Проверить» — сразу
 lock = threading.Lock()
 known = {"available": None, "checked": 0}
+acct = {"got": None, "at": 0}   # `claude auth status` starts a program: at most once a minute, «Проверить» asks at once
 job = {"state": "idle", "from": None, "to": None, "tail": "", "ts": 0}   # idle | running | done | failed
 
 
@@ -28,6 +30,12 @@ def info(fresh=False):
     return {"path": path, "real": os.path.realpath(path), "method": how, "command": cmd, "channel": chan,
             "have": have, "available": known["available"], "checked": known["checked"],
             "newer": cu.newer(known["available"], have), "installed_at": cu.installed_at(path), "job": dict(job)}
+
+
+def account_info(last, fresh=False):
+    if fresh or not acct["got"] or time.time() - acct["at"] > ACCOUNT_S:
+        acct.update(got=cu.account(cu.find_claude()), at=time.time())
+    return {**acct["got"], "checked": acct["at"], "fallen": cu.fallen(last)}
 
 
 def run_update():
@@ -79,7 +87,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         origin = self.ours()
         if not origin:
             return
-        q = parse_qs(urlparse(self.path).query)
+        url = urlparse(self.path)
+        q = parse_qs(url.query)
+        if url.path == "/account":
+            try:
+                last = json.loads(q.get("last", ["[]"])[0])
+            except ValueError:
+                last = []
+            return self.reply(200, account_info(last[:80] if isinstance(last, list) else [], q.get("fresh") == ["1"]), origin)
         body = info(fresh=q.get("fresh") == ["1"])
         try:
             sessions = json.loads(q.get("sessions", ["[]"])[0])

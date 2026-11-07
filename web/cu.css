@@ -1,1 +1,19 @@
 .cu-tail { max-height: 240px; overflow: auto; font: var(--text-xs) var(--font-mono); white-space: pre-wrap; margin: 0; }
+.cu-wrap { display: grid; gap: var(--space-4); }
+.cu-sep { border: 0; border-top: 1px solid var(--border); margin: 0; width: 100%; }
+.cu-sub { margin: 0; font-weight: 600; font-size: var(--text-sm); }
+.cu-st { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
+.cu-dot { width: 8px; height: 8px; border-radius: 9999px; display: inline-block; background: var(--muted-foreground); }
+.cu-st[data-s="ok"] .cu-dot { background: var(--success); }
+.cu-st[data-s="warn"] .cu-dot { background: var(--warning); }
+.cu-st[data-s="off"] .cu-dot { background: var(--destructive); }
+.cu-st[data-s="wait"] .cu-dot { background: var(--primary); }
+.cu-err { margin: 0; font-size: var(--text-sm); color: var(--destructive); }
+.cu-hint { margin: 0; font-size: var(--text-xs); color: var(--muted-foreground); }
+.cu-acts { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.cu-acts a.btn { text-decoration: none; }
+.cu-acts a.btn:not(.primary) { color: var(--foreground); }
+.cu-code { display: flex; gap: var(--space-2); align-items: center; max-width: 520px; }
+.cu-code input { flex: 1; min-width: 0; height: 30px; box-sizing: border-box; padding: 0 var(--space-2); border: 1px solid var(--input);
+  border-radius: var(--radius); background: var(--background); color: var(--foreground); }
+@media (pointer: coarse) { .cu-acts .btn { min-height: 40px; } .cu-code input { height: 40px; } }

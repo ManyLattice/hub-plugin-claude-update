@@ -1,4 +1,5 @@
 """Какой claude у хаба, как он поставлен, есть ли новее и кто из сессий работает на старом."""
+import datetime
 import json
 import os
 import re
@@ -123,3 +124,71 @@ def clean_env(env=os.environ):
 def update_command(path, chan):
     how, cmd = method(path)
     return how, [c.replace("{channel}", chan) for c in cmd] if cmd else None
+
+
+AUTH_FAIL = re.compile(r"OAuth session expired|could not be refreshed|authentication_failed|failed to authenticate|"
+                       r"token (has been )?(revoked|expired)|invalid api key|please run /login|api error: 401\b", re.I)
+EXPIRED = re.compile(r"OAuth session expired and could not be refreshed", re.I)
+FELL_MAX_AGE = 86400    # an auth error older than a day is not a session waiting for a login
+SOON_DAYS = 7
+PLANS = {"max": "Claude Max", "pro": "Claude Pro", "team": "Claude Team", "enterprise": "Claude Enterprise",
+         "free": "Claude Free"}
+
+
+def expiry(value):
+    """loginExpiresAt in unix seconds from a number (seconds or milliseconds) or an ISO string; None when Claude does
+    not say."""
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) / 1000 if value > 1e11 else float(value)
+    try:
+        return datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def auth_status(path, run=subprocess.run):
+    """`claude auth status --json` of the claude the hub runs, or None when it gives no JSON (an older Claude Code)."""
+    try:
+        out = run([path, "auth", "status", "--json"], capture_output=True, text=True, timeout=30, env=clean_env(),
+                  stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    start = (out or "").find("{")
+    try:
+        got = json.loads(out[start:]) if start >= 0 else None
+    except ValueError:
+        return None
+    return got if isinstance(got, dict) else None
+
+
+def account(path, now=None, env=os.environ, run=subprocess.run):
+    """The account of this claude for the page: {known, logged_in, email, plan, expires_at, days_left, config_dir,
+    config_match}. Not known (known False) when status gives no JSON. config_match is False when status speaks of
+    another profile than CLAUDE_CONFIG_DIR of the plugin process (the hub's sessions use that one)."""
+    st = auth_status(path, run)
+    if st is None:
+        return {"known": False}
+    now = time.time() if now is None else now
+    at = expiry(st.get("loginExpiresAt"))
+    sub = str(st.get("subscriptionType") or "").lower()
+    asked = os.path.realpath(os.path.expanduser(env.get("CLAUDE_CONFIG_DIR") or os.path.join(env.get("HOME") or "~", ".claude")))
+    got = st.get("configDirectory")
+    return {"known": True, "logged_in": bool(st.get("loggedIn")), "email": st.get("email") or None,
+            "plan": PLANS.get(sub) or (f"Claude {sub.capitalize()}" if sub else None), "expires_at": at,
+            "days_left": None if at is None else int((at - now) // 86400) if at >= now else -1,
+            "config_dir": got, "config_match": not got or os.path.realpath(os.path.expanduser(str(got))) == asked}
+
+
+def fallen(last, now=None, states_busy=("busy", "starting", "dialog")):
+    """Sessions whose last answer is an auth error: last = [{name, state, ts, text}], the last row of each session's
+    feed that is an error. -> {names, since, reason} (since: the earliest error, reason: what Claude said)."""
+    now = time.time() if now is None else now
+    hit = [x for x in last if isinstance(x, dict) and isinstance(x.get("name"), str) and x.get("state") not in states_busy
+           and AUTH_FAIL.search(str(x.get("text") or "")) and now - float(x.get("ts") or 0) <= FELL_MAX_AGE]
+    if not hit:
+        return {"names": [], "since": None, "reason": None}
+    text = str(hit[0].get("text") or "")
+    reason = "OAuth session expired and could not be refreshed" if EXPIRED.search(text) else " ".join(text.split())[:120]
+    return {"names": sorted(x["name"] for x in hit), "since": min(float(x.get("ts") or 0) for x in hit), "reason": reason}
