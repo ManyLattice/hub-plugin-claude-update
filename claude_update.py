@@ -133,6 +133,8 @@ FELL_MAX_AGE = 86400    # an auth error older than a day is not a session waitin
 SOON_DAYS = 7
 PLANS = {"max": "Claude Max", "pro": "Claude Pro", "team": "Claude Team", "enterprise": "Claude Enterprise",
          "free": "Claude Free"}
+ORG_PLANS = {"claude_max": "Claude Max", "claude_pro": "Claude Pro", "claude_team": "Claude Team",
+             "claude_enterprise": "Claude Enterprise"}
 
 
 def expiry(value):
@@ -163,21 +165,91 @@ def auth_status(path, run=subprocess.run):
     return got if isinstance(got, dict) else None
 
 
+def config_home(env=os.environ):
+    """The folder of the profile's settings.json: CLAUDE_CONFIG_DIR or ~/.claude."""
+    return os.path.expanduser(env.get("CLAUDE_CONFIG_DIR") or os.path.join(env.get("HOME") or "~", ".claude"))
+
+
+def profile_file(env=os.environ):
+    """Where Claude Code keeps oauthAccount (checked against the claude binary, 2.1.319): $CLAUDE_CONFIG_DIR/.claude.json,
+    and ~/.claude.json (not inside ~/.claude) when CLAUDE_CONFIG_DIR is not set."""
+    base = env.get("CLAUDE_CONFIG_DIR") or env.get("HOME") or "~"
+    return os.path.join(os.path.expanduser(base), ".claude.json")
+
+
+def plan_of(org_type, user_tier, org_tier):
+    """A plan for people from the fields of oauthAccount: organizationType (claude_max, claude_team…) and the rate limit
+    tiers (default_claude_max_5x…). An organizationType we do not know is shown as is; nothing known gives None."""
+    kind = str(org_type or "").strip().lower()
+    mult = re.search(r"max_(\d+x)", str(user_tier or "").lower()) or (
+        re.search(r"max_(\d+x)", str(org_tier or "").lower()) if kind in ("", "claude_max") else None)
+    base = ORG_PLANS.get(kind)
+    if kind == "claude_max" and mult:
+        return f"Claude Max {mult.group(1)}"
+    if base and mult and kind != "claude_max":
+        return f"{base} · Max {mult.group(1)}"
+    if base:
+        return base
+    if kind:
+        return str(org_type).strip()
+    return f"Claude Max {mult.group(1)}" if mult else None
+
+
+def profile_account(env=os.environ):
+    """{email, plan} from oauthAccount of the profile's .claude.json, or {} when the file or the fields are not there.
+    Only these fields are taken; the rest of the file is never kept or logged."""
+    try:
+        with open(profile_file(env), encoding="utf-8") as f:
+            got = json.load(f).get("oauthAccount")
+    except (OSError, ValueError, AttributeError):
+        return {}
+    if not isinstance(got, dict):
+        return {}
+    email = got.get("emailAddress")
+    return {"email": email.strip() if isinstance(email, str) and email.strip() else None,
+            "plan": plan_of(got.get("organizationType"), got.get("userRateLimitTier"), got.get("organizationRateLimitTier"))}
+
+
+def token_in_settings(env=os.environ):
+    """settings.json of the profile has CLAUDE_CODE_OAUTH_TOKEN in `env` (only the name is looked at, never the value):
+    the hub puts it into the environment of its sessions (core/catalog.py user_env), and a token outranks a login."""
+    try:
+        with open(os.path.join(config_home(env), "settings.json"), encoding="utf-8-sig") as f:
+            got = json.load(f).get("env")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(got, dict) and bool(got.get("CLAUDE_CODE_OAUTH_TOKEN"))
+
+
 def account(path, now=None, env=os.environ, run=subprocess.run):
     """The account of this claude for the page: {known, logged_in, email, plan, expires_at, days_left, config_dir,
-    config_match}. Not known (known False) when status gives no JSON. config_match is False when status speaks of
-    another profile than CLAUDE_CONFIG_DIR of the plugin process (the hub's sessions use that one)."""
+    config_match, auth_method, token, token_in_settings, from_profile}. Not known (known False) when status gives no
+    JSON. On a token sign-in (authMethod oauth_token) status gives no email and plan: they come from oauthAccount of the
+    profile (from_profile), which is the last interactive login of this Mac and may not be the token's account.
+    config_match is False when status speaks of another profile than CLAUDE_CONFIG_DIR of the plugin process (the hub's
+    sessions use that one)."""
     st = auth_status(path, run)
     if st is None:
         return {"known": False}
     now = time.time() if now is None else now
     at = expiry(st.get("loginExpiresAt"))
     sub = str(st.get("subscriptionType") or "").lower()
+    email = st.get("email") or None
+    plan = PLANS.get(sub) or (f"Claude {sub.capitalize()}" if sub else None)
+    method = st.get("authMethod") if isinstance(st.get("authMethod"), str) else None
+    from_profile = False
+    if st.get("loggedIn") and not (email and plan):
+        mine = profile_account(env)
+        if mine and (not email or str(mine.get("email") or "").lower() == str(email).lower()):
+            got = (email or mine.get("email"), plan or mine.get("plan"))
+            from_profile = got != (email, plan)
+            email, plan = got
     asked = os.path.realpath(os.path.expanduser(env.get("CLAUDE_CONFIG_DIR") or os.path.join(env.get("HOME") or "~", ".claude")))
     got = st.get("configDirectory")
-    return {"known": True, "logged_in": bool(st.get("loggedIn")), "email": st.get("email") or None,
-            "plan": PLANS.get(sub) or (f"Claude {sub.capitalize()}" if sub else None), "expires_at": at,
+    return {"known": True, "logged_in": bool(st.get("loggedIn")), "email": email, "plan": plan, "expires_at": at,
             "days_left": None if at is None else int((at - now) // 86400) if at >= now else -1,
+            "auth_method": method, "token": method == "oauth_token",
+            "token_in_settings": method == "oauth_token" and token_in_settings(env), "from_profile": from_profile,
             "config_dir": got, "config_match": not got or os.path.realpath(os.path.expanduser(str(got))) == asked}
 
 

@@ -1,4 +1,6 @@
+import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -130,7 +132,7 @@ class Account(unittest.TestCase):
 
     def test_an_expiry_in_the_past_is_minus_one_day(self):
         out = '{"loggedIn": true, "loginExpiresAt": %d}' % (NOW - 5)
-        self.assertEqual(cu.account("claude", now=NOW, run=status_run(out))["days_left"], -1)
+        self.assertEqual(cu.account("claude", now=NOW, env={"CLAUDE_CONFIG_DIR": "/cfg"}, run=status_run(out))["days_left"], -1)
 
     def test_status_of_another_profile_is_not_a_match(self):
         out = '{"loggedIn": true, "configDirectory": "/other"}'
@@ -147,6 +149,94 @@ class Account(unittest.TestCase):
 
     def test_json_after_a_banner_line_is_read(self):
         self.assertEqual(cu.auth_status("claude", run=status_run('update available\n{"loggedIn": false}')), {"loggedIn": False})
+
+
+TOKEN_STATUS = ('{"loggedIn": true, "authMethod": "oauth_token", "apiProvider": "firstParty", '
+                '"configDirectory": "%s", "loginExpiresAt": null}')
+
+
+class TokenSignIn(unittest.TestCase):
+    def profile(self, claude_json=None, settings=None):
+        """A fake profile: CLAUDE_CONFIG_DIR/.claude.json (as the claude binary reads it) and settings.json."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        cfg = os.path.join(d, "cfg")
+        os.makedirs(cfg)
+        if claude_json is not None:
+            with open(os.path.join(cfg, ".claude.json"), "w") as f:
+                json.dump(claude_json, f)
+        if settings is not None:
+            with open(os.path.join(cfg, "settings.json"), "w") as f:
+                json.dump(settings, f)
+        return cfg
+
+    def got(self, cfg, status=None):
+        return cu.account("claude", now=NOW, env={"CLAUDE_CONFIG_DIR": cfg}, run=status_run(status or TOKEN_STATUS % cfg))
+
+    def test_email_and_plan_come_from_the_profile_when_status_has_none(self):
+        cfg = self.profile({"oauthAccount": {"emailAddress": "owner@example.com", "organizationType": "claude_max",
+                                             "organizationRateLimitTier": "default_claude_max_5x", "accountUuid": "u-1"}})
+        got = self.got(cfg)
+        self.assertEqual((got["email"], got["plan"], got["from_profile"]), ("owner@example.com", "Claude Max 5x", True))
+        self.assertTrue(got["token"])
+        self.assertNotIn("u-1", json.dumps(got))
+
+    def test_team_seat_shows_the_seat_limit(self):
+        cfg = self.profile({"oauthAccount": {"emailAddress": "owner@example.com", "organizationType": "claude_team",
+                                             "userRateLimitTier": "default_claude_max_5x", "organizationRateLimitTier": "default_x"}})
+        self.assertEqual(self.got(cfg)["plan"], "Claude Team \u00b7 Max 5x")
+
+    def test_plan_of_known_and_unknown_types(self):
+        self.assertEqual(cu.plan_of("claude_pro", None, None), "Claude Pro")
+        self.assertEqual(cu.plan_of("claude_enterprise", None, None), "Claude Enterprise")
+        self.assertEqual(cu.plan_of("claude_max", None, "default_claude_max_20x"), "Claude Max 20x")
+        self.assertEqual(cu.plan_of("claude_max", None, None), "Claude Max")
+        self.assertEqual(cu.plan_of("claude_future", None, None), "claude_future")
+        self.assertEqual(cu.plan_of(None, "default_claude_max_5x", None), "Claude Max 5x")
+        self.assertIsNone(cu.plan_of(None, None, "default_raven"))
+
+    def test_nothing_in_the_profile_leaves_email_and_plan_empty(self):
+        for cfg in (self.profile(), self.profile({"other": 1}), self.profile({"oauthAccount": "junk"})):
+            got = self.got(cfg)
+            self.assertEqual((got["email"], got["plan"], got["from_profile"], got["token"]), (None, None, False, True))
+        broken = self.profile()
+        with open(os.path.join(broken, ".claude.json"), "w") as f:
+            f.write("{not json")
+        self.assertIsNone(self.got(broken)["email"])
+
+    def test_status_that_names_the_account_is_not_overwritten_by_the_profile(self):
+        cfg = self.profile({"oauthAccount": {"emailAddress": "other@example.com", "organizationType": "claude_pro"}})
+        out = '{"loggedIn": true, "authMethod": "claude.ai", "email": "owner@example.com", "subscriptionType": "max"}'
+        got = self.got(cfg, out)
+        self.assertEqual((got["email"], got["plan"], got["from_profile"], got["token"]), ("owner@example.com", "Claude Max", False, False))
+
+    def test_the_profile_of_another_account_does_not_lend_its_plan(self):
+        cfg = self.profile({"oauthAccount": {"emailAddress": "other@example.com", "organizationType": "claude_pro"}})
+        got = self.got(cfg, '{"loggedIn": true, "authMethod": "claude.ai", "email": "owner@example.com"}')
+        self.assertEqual((got["email"], got["plan"]), ("owner@example.com", None))
+
+    def test_not_logged_in_does_not_read_the_profile(self):
+        cfg = self.profile({"oauthAccount": {"emailAddress": "owner@example.com"}})
+        got = self.got(cfg, '{"loggedIn": false}')
+        self.assertIsNone(got["email"])
+
+    def test_profile_file_follows_the_config_dir_rule_of_claude(self):
+        self.assertEqual(cu.profile_file({"CLAUDE_CONFIG_DIR": "/cfg", "HOME": "/h"}), "/cfg/.claude.json")
+        self.assertEqual(cu.profile_file({"HOME": "/h"}), "/h/.claude.json")
+
+    def test_token_in_settings_is_found_by_name_and_never_returned(self):
+        cfg = self.profile(settings={"env": {"CLAUDE_CODE_OAUTH_TOKEN": "sample-token-value", "HTTPS_PROXY": "x"}})
+        got = self.got(cfg)
+        self.assertTrue(got["token_in_settings"])
+        self.assertNotIn("sample-token-value", json.dumps(got))
+        self.assertFalse(self.got(self.profile(settings={"env": {"HTTPS_PROXY": "x"}}))["token_in_settings"])
+        self.assertFalse(self.got(self.profile())["token_in_settings"])
+
+    def test_a_login_in_the_browser_is_not_a_token(self):
+        cfg = self.profile(settings={"env": {"CLAUDE_CODE_OAUTH_TOKEN": "sample-token-value"}})
+        got = self.got(cfg, '{"loggedIn": true, "authMethod": "claude.ai", "email": "owner@example.com", "subscriptionType": "pro"}')
+        self.assertFalse(got["token"])
+        self.assertFalse(got["token_in_settings"])
 
 
 class Fallen(unittest.TestCase):

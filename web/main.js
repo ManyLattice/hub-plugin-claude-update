@@ -178,7 +178,7 @@ async function tickAccount(fresh = false) {
   if (pendingStart && j && j.started >= pendingStart - 2) pendingStart = 0;
   if (!running || !acc) await loadAccount(fresh);
   const recent = j && Date.now() / 1000 - (j.ts || 0) < LOGIN_SHOW_S;   // давнему входу «продолжи» не пишем: только свежему
-  if (j?.state === "done" && recent && j.started > sentLogin() && !sending) await continueFallen(j);
+  if (j?.state === "done" && recent && j.started > sentLogin() && !sending && !acc?.token) await continueFallen(j);
   accTimer = setTimeout(() => tickAccount(), running || Date.now() < fastUntil ? RUN_MS : POLL_MS);
   rev++;
   render();
@@ -253,8 +253,30 @@ function facts(rows) {
   return dl;
 }
 
+// аккаунт пула хаба, на котором сейчас сессии (по снимку страницы); пул выключен или пуст - null
+function poolNow() {
+  const snap = hub.snapshot() || {}, name = snap.accounts?.on ? snap.account?.active : "";
+  if (!name) return null;
+  const p = (snap.accounts.pool || []).find((x) => x.name === name);
+  return { name, email: p?.email || "" };
+}
+
 function whoFacts(extra = []) {
-  return [["Вошёл", acc.email], ["План", acc.plan], ["Вход действует до", day(acc.expires_at) || "срок Claude не сообщает"], ...extra];
+  const email = acc.email || (acc.token && !acc.plan ? "вход по токену, почту Claude не сообщает" : null);
+  return [["Вошёл", email], ["План", acc.plan], ["Вход действует до", day(acc.expires_at) || "срок Claude не сообщает"], ...extra];
+}
+
+// вход по токену (CLAUDE_CODE_OAUTH_TOKEN): токен главнее входа в браузере, поэтому «Войти заново» его не заменит
+function tokenNotes() {
+  const el = hub.el, pool = poolNow(), out = [];
+  if (acc.token) {
+    out.push(el("p", "hint", `Вход по токену${acc.token_in_settings ? " (CLAUDE_CODE_OAUTH_TOKEN в settings.json профиля)" : ""}: он главнее входа в браузере, `
+      + "поэтому «Войти» сессии не поправит. Новый токен: claude setup-token, записать туда же."));
+    if (acc.from_profile) out.push(el("p", "cu-hint", "Почта и план взяты из записи профиля на этом Mac (последний вход в браузере): токен может быть от другого аккаунта."));
+  }
+  if (pool) out.push(el("p", "cu-hint", "Аккаунтами сессий управляет пул хаба. Вход здесь меняет только вход этого Mac; "
+    + "токены других аккаунтов пула обновляет hub accounts token."));
+  return out;
 }
 
 function accountBox() {
@@ -303,8 +325,10 @@ function loginRunning(box, j) {
 function loginDone(box) {
   const el = hub.el;
   box.append(status("ok", "Вход выполнен"), facts(whoFacts()));
-  box.append(el("p", "hint", "Работающие сессии подхватят вход сами при следующем запросе (до полуминуты)."
-    + (sending ? " Пишу упавшим сессиям…" : loginNote ? ` ${loginNote}` : "")));
+  box.append(el("p", "hint", acc.token ? "Claude берёт токен из окружения, вход в браузере его не заменил: сессии остались на токене."
+    : "Работающие сессии подхватят вход сами при следующем запросе (до полуминуты)."
+      + (sending ? " Пишу упавшим сессиям…" : loginNote ? ` ${loginNote}` : "")));
+  if (acc.token) box.append(...tokenNotes());
 }
 
 function idle(box, failed) {
@@ -315,7 +339,7 @@ function idle(box, failed) {
   let kind = "ok", label = "В порядке", hint = "", primary = false, go = "Войти заново", rows = [];
   if (!acc.known) { kind = "wait"; label = "Статус входа неизвестен"; hint = "claude не показал статус входа (старая версия Claude Code?)."; go = "Войти"; }
   else if (fell.length) {
-    kind = "off"; label = "Вход слетел"; primary = true;
+    kind = "off"; label = acc.token ? "Сессии не принимают токен" : "Вход слетел"; primary = !acc.token;
     rows = [["Был вход", [acc.email, acc.plan].filter(Boolean).join(" · ")], ["Слетел", acc.fallen.since ? `${when(acc.fallen.since)} (по ошибке сессии)` : null],
             ["Упали сессии", `${fell.length}: ${fell.join(", ")}`]];
   } else if (!acc.logged_in) {
@@ -327,13 +351,16 @@ function idle(box, failed) {
     hint = "Зайди заново до этой даты - иначе сессии начнут падать с «OAuth session expired».";
   }
   box.append(status(kind, label));
-  if (fell.length) box.append(facts(rows), el("p", "cu-err", `Сессии хаба не могут ходить к Claude: «${acc.fallen.reason}». ${can ? "Войди заново - после этого напишу упавшим «продолжи»." : ""}`.trim()));
-  else if (acc.known && acc.logged_in) box.append(facts([...whoFacts(), ["Проверено", when(acc.checked)]]));
+  const pool = poolNow();
+  const mine = [...whoFacts(), ...(pool ? [["Сессии хаба сейчас", [pool.name, pool.email].filter(Boolean).join(" · ")]] : [])];
+  if (fell.length) box.append(facts(rows), el("p", "cu-err", `Сессии хаба не могут ходить к Claude: «${acc.fallen.reason}». ${can && !acc.token ? "Войди заново - после этого напишу упавшим «продолжи»." : ""}`.trim()));
+  else if (acc.known && acc.logged_in) box.append(facts([...mine, ["Проверено", when(acc.checked)]]));
   if (hint) box.append(el("p", "hint", hint));
+  if (acc.known && acc.logged_in) box.append(...tokenNotes());
   if (acc.known && acc.config_match === false) box.append(el("p", "cu-hint", `Статус относится к профилю ${acc.config_dir}, это не профиль плагина (CLAUDE_CONFIG_DIR).`));
   if (failed) box.append(el("p", "cu-err", WHY[failed.why] || (failed.text ? `Вход не вышел: ${failed.text}` : "Вход не вышел.")));
   if (startErr) box.append(el("p", "cu-err", startErr));
-  if (can) box.append(actions(btn(go, primary ? "primary" : "", startLogin)));
+  if (can) box.append(actions(btn(acc.token ? "Войти на этом Mac" : go, primary ? "primary" : "", startLogin)));
   else box.append(el("p", "hint", TERMINAL));
 }
 
